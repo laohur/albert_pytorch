@@ -1,5 +1,6 @@
 import os
 import random
+
 import torch
 import json
 import time
@@ -21,15 +22,103 @@ from callback.optimization.adamw import AdamW
 from callback.lr_scheduler import get_linear_schedule_with_warmup
 from tools.common import seed_everything
 
-from pretrain_dataloader import PregeneratedDataset
+InputFeatures = namedtuple("InputFeatures", "input_ids input_mask segment_ids lm_label_ids is_next")
 
+def convert_example_to_features(example, tokenizer, max_seq_length):
+    tokens = example["tokens"]
+    segment_ids = example["segment_ids"]
+    is_random_next = example["is_random_next"]
+    masked_lm_positions = example["masked_lm_positions"]
+    masked_lm_labels = example["masked_lm_labels"]
 
-def train(file_path):
+    assert len(tokens) == len(segment_ids) <= max_seq_length  # The preprocessed data should be already truncated
+    input_ids = tokenizer.convert_tokens_to_ids(tokens)
+    masked_label_ids = tokenizer.convert_tokens_to_ids(masked_lm_labels)
+    input_array = np.zeros(max_seq_length, dtype=np.int)
+    input_array[:len(input_ids)] = input_ids
+    mask_array = np.zeros(max_seq_length, dtype=np.bool)
+    mask_array[:len(input_ids)] = 1
+    segment_array = np.zeros(max_seq_length, dtype=np.bool)
+    segment_array[:len(segment_ids)] = segment_ids
+    lm_label_array = np.full(max_seq_length, dtype=np.int, fill_value=-1)
+    lm_label_array[masked_lm_positions] = masked_label_ids
+
+    features = InputFeatures(input_ids=input_array,
+                             input_mask=mask_array,
+                             segment_ids=segment_array,
+                             lm_label_ids=lm_label_array,
+                             is_next=is_random_next)
+    return features
+
+class PregeneratedDataset(Dataset):
+    def __init__(self, training_path, file_id, tokenizer, data_name, reduce_memory=False):
+        self.tokenizer = tokenizer
+        self.file_id = file_id
+        data_file = training_path / f"{data_name}_file_{self.file_id}.json"
+        metrics_file = training_path / f"{data_name}_file_{self.file_id}_metrics.json"
+        assert data_file.is_file() and metrics_file.is_file()
+        metrics = json.loads(metrics_file.read_text())
+        num_samples = metrics['num_training_examples']
+        seq_len = metrics['max_seq_len']
+        self.temp_dir = None
+        self.working_dir = None
+        if reduce_memory:
+            self.temp_dir = TemporaryDirectory()
+            self.working_dir = Path(self.temp_dir.name)
+            input_ids = np.memmap(filename=self.working_dir / 'input_ids.memmap',
+                                  mode='w+', dtype=np.int32, shape=(num_samples, seq_len))
+            input_masks = np.memmap(filename=self.working_dir / 'input_masks.memmap',
+                                    shape=(num_samples, seq_len), mode='w+', dtype=np.bool)
+            segment_ids = np.memmap(filename=self.working_dir / 'segment_ids.memmap',
+                                    shape=(num_samples, seq_len), mode='w+', dtype=np.bool)
+            lm_label_ids = np.memmap(filename=self.working_dir / 'lm_label_ids.memmap',
+                                     shape=(num_samples, seq_len), mode='w+', dtype=np.int32)
+            lm_label_ids[:] = -1
+            is_nexts = np.memmap(filename=self.working_dir / 'is_nexts.memmap',
+                                 shape=(num_samples,), mode='w+', dtype=np.bool)
+        else:
+            input_ids = np.zeros(shape=(num_samples, seq_len), dtype=np.int32)
+            input_masks = np.zeros(shape=(num_samples, seq_len), dtype=np.bool)
+            segment_ids = np.zeros(shape=(num_samples, seq_len), dtype=np.bool)
+            lm_label_ids = np.full(shape=(num_samples, seq_len), dtype=np.int32, fill_value=-1)
+            is_nexts = np.zeros(shape=(num_samples,), dtype=np.bool)
+        logger.info(f"Loading training examples for {str(data_file)}")
+        with data_file.open() as f:
+            for i, line in enumerate(f):
+                line = line.strip()
+                example = json.loads(line)
+                features = convert_example_to_features(example, tokenizer, seq_len)
+                input_ids[i] = features.input_ids
+                segment_ids[i] = features.segment_ids
+                input_masks[i] = features.input_mask
+                lm_label_ids[i] = features.lm_label_ids
+                is_nexts[i] = features.is_next
+        assert i == num_samples - 1  # Assert that the sample count metric was true
+        logger.info("Loading complete!")
+        self.num_samples = num_samples
+        self.seq_len = seq_len
+        self.input_ids = input_ids
+        self.input_masks = input_masks
+        self.segment_ids = segment_ids
+        self.lm_label_ids = lm_label_ids
+        self.is_nexts = is_nexts
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, item):
+        return (torch.tensor(self.input_ids[item].astype(np.int64)),
+                torch.tensor(self.input_masks[item].astype(np.int64)),
+                torch.tensor(self.segment_ids[item].astype(np.int64)),
+                torch.tensor(self.lm_label_ids[item].astype(np.int64)),
+                torch.tensor(self.is_nexts[item].astype(np.int64)))
+
+def train():
     global_step = 0
     start_time = time.time()
-    epoch_dataset = PregeneratedDataset(input_file=file_path,tokenizer=tokenizer)
-    # epoch_dataset = PregeneratedDataset(file_id=idx, training_path=pregenerated_data, tokenizer=tokenizer,
-    #                                     reduce_memory=args.reduce_memory, data_name=args.data_name)
+
+    epoch_dataset = PregeneratedDataset(file_id=idx, training_path=pregenerated_data, tokenizer=tokenizer,
+                                        reduce_memory=args.reduce_memory, data_name=args.data_name)
     if args.local_rank == -1:
         train_sampler = RandomSampler(epoch_dataset)
     else:
@@ -295,11 +384,14 @@ if __name__ == '__main__':
         os.system(f"{command}")
 
     for epoch in range(args.epochs):
-        small_path = config['data_dir'] / "corpus/small"
-        files = sorted([f for f in small_path.iterdir() if f.exists() and '.txt' in str(f)])
-        for file_path in files:
-
-            train(file_path)
+        big_dir=args.data_dir / "corpus/big"
+        big_files = sorted([f for f in big_dir.iterdir() if f.exists() and '.txt' in str(f)])
+        random.shuffle(big_files)
+        for big_file in big_files:
+            refresh_train_data(big_file.name)
+            for idx in range(args.file_num):
+                print(f" bigfile {big_file.name}   idx {idx } ")
+                train()
 
 # if __name__ == '__main__':
     # main()

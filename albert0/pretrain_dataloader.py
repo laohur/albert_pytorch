@@ -1,6 +1,8 @@
 import os
 import json
 import random
+import sys
+
 import numpy as np
 import collections
 from pathlib import Path
@@ -9,6 +11,108 @@ from argparse import ArgumentParser
 from tools.common import seed_everything
 from model.tokenization_bert import BertTokenizer
 from callback.progressbar import ProgressBar
+import os
+import random
+
+import torch
+import json
+import time
+import numpy as np
+from pathlib import Path
+from argparse import ArgumentParser
+from collections import namedtuple
+from tempfile import TemporaryDirectory
+from tools.common import logger, init_logger
+from torch.utils.data import DataLoader, Dataset, RandomSampler
+from torch.utils.data.distributed import DistributedSampler
+from tools.common import AverageMeter
+from metrics.custom_metrics import LMAccuracy
+from torch.nn import CrossEntropyLoss
+from model.modeling_albert import AlbertForPreTraining, AlbertConfig
+from model.file_utils import CONFIG_NAME
+from model.tokenization_bert import BertTokenizer
+from callback.optimization.adamw import AdamW
+from callback.lr_scheduler import get_linear_schedule_with_warmup
+from tools.common import seed_everything
+
+InputFeatures = namedtuple("InputFeatures", "input_ids input_mask segment_ids lm_label_ids is_next")
+
+def convert_example_to_features(example, tokenizer, max_seq_length):
+    tokens = example["tokens"]
+    segment_ids = example["segment_ids"]
+    is_random_next = example["is_random_next"]
+    masked_lm_positions = example["masked_lm_positions"]
+    masked_lm_labels = example["masked_lm_labels"]
+
+    assert len(tokens) == len(segment_ids) <= max_seq_length  # The preprocessed data should be already truncated
+    input_ids = tokenizer.convert_tokens_to_ids(tokens)
+    masked_label_ids = tokenizer.convert_tokens_to_ids(masked_lm_labels)
+    input_array = np.zeros(max_seq_length, dtype=np.int)
+    input_array[:len(input_ids)] = input_ids
+    mask_array = np.zeros(max_seq_length, dtype=np.bool)
+    mask_array[:len(input_ids)] = 1
+    segment_array = np.zeros(max_seq_length, dtype=np.bool)
+    segment_array[:len(segment_ids)] = segment_ids
+    lm_label_array = np.full(max_seq_length, dtype=np.int, fill_value=-1)
+    lm_label_array[masked_lm_positions] = masked_label_ids
+
+    features = InputFeatures(input_ids=input_array,
+                             input_mask=mask_array,
+                             segment_ids=segment_array,
+                             lm_label_ids=lm_label_array,
+                             is_next=is_random_next)
+    return features
+
+class PregeneratedDataset(Dataset):
+    def __init__(self, input_file,tokenizer,  seq_len=128 ,max_ngram=3):
+        file_examples = create_training_instances(input_file=input_file,
+                                                  tokenizer=tokenizer,
+                                                  max_seq_len=seq_len,
+                                                  max_ngram=max_ngram,
+                                                  short_seq_prob=0.1, #"Probability of making a short sentence as a training example"
+                                                  masked_lm_prob=0.15, #"Probability of masking each token for the LM task"
+                                                  max_predictions_per_seq=20) #"Maximum number of tokens to mask in each sequence"
+        self.tokenizer = tokenizer
+
+        num_samples = len(file_examples)
+        self.temp_dir = None
+        self.working_dir = None
+
+        input_ids = np.zeros(shape=(num_samples, seq_len), dtype=np.int32)
+        input_masks = np.zeros(shape=(num_samples, seq_len), dtype=np.bool)
+        segment_ids = np.zeros(shape=(num_samples, seq_len), dtype=np.bool)
+        lm_label_ids = np.full(shape=(num_samples, seq_len), dtype=np.int32, fill_value=-1)
+        is_nexts = np.zeros(shape=(num_samples,), dtype=np.bool)
+        # logger.info(f"Loading training examples for {str(data_file)}")
+        # with data_file.open() as f:
+        for i, line in enumerate(file_examples):
+            # line = line.strip()
+            # example = json.loads(line)
+            features = convert_example_to_features(line, tokenizer, seq_len)
+            input_ids[i] = features.input_ids
+            segment_ids[i] = features.segment_ids
+            input_masks[i] = features.input_mask
+            lm_label_ids[i] = features.lm_label_ids
+            is_nexts[i] = features.is_next
+        assert i == num_samples - 1  # Assert that the sample count metric was true
+        logger.info("Loading complete!")
+        self.num_samples = num_samples
+        self.seq_len = seq_len
+        self.input_ids = input_ids
+        self.input_masks = input_masks
+        self.segment_ids = segment_ids
+        self.lm_label_ids = lm_label_ids
+        self.is_nexts = is_nexts
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, item):
+        return (torch.tensor(self.input_ids[item].astype(np.int64)),
+                torch.tensor(self.input_masks[item].astype(np.int64)),
+                torch.tensor(self.segment_ids[item].astype(np.int64)),
+                torch.tensor(self.lm_label_ids[item].astype(np.int64)),
+                torch.tensor(self.is_nexts[item].astype(np.int64)))
 
 MaskedLmInstance = collections.namedtuple("MaskedLmInstance", ["index", "label"])
 
@@ -227,137 +331,62 @@ def create_training_instances(input_file, tokenizer, max_seq_len, short_seq_prob
     random.shuffle(instances)
     return instances
 
+def train(  file_path,tokenizer,   max_seq_len):
+    # global_step = 0
+    # start_time = time.time()
+    epoch_dataset = PregeneratedDataset(input_file=file_path,
+                                                  tokenizer=tokenizer,
+                                                  seq_len=max_seq_len,
+                                                  max_ngram=3)
+    # if args.local_rank == -1:
+    train_sampler = RandomSampler(epoch_dataset)
+    # else:
+    #     train_sampler = DistributedSampler(epoch_dataset)
+    train_dataloader = DataLoader(epoch_dataset, sampler=train_sampler, batch_size=4)
+    # model.train()
+    nb_tr_examples, nb_tr_steps = 0, 0
+    for step, batch in enumerate(train_dataloader):
+        batch = tuple(t.to("cuda") for t in batch)
+        input_ids, input_mask, segment_ids, lm_label_ids, is_next = batch
+        # print("success!")
 
 def main():
     parser = ArgumentParser()
     ## Required parameters
-    # parser.add_argument("--data_dir", default=None, type=str, required=True)
-    # parser.add_argument("--vocab_path", default=None, type=str, required=True)
-    # parser.add_argument("--output_dir", default='outputs', type=str )
-
-
-    parser.add_argument("--do_split", default=False, action='store_true')
-    parser.add_argument("--do_mdata", default=False, action='store_true')  # 多进程
-    parser.add_argument("--idx", default=0, type=int) # 当前进程
     parser.add_argument("--do_data", default=True, action='store_true')
-    parser.add_argument("--big_file", default='zhwikibooks-20200520-pages-articles.txt', type=str)
-
     parser.add_argument('--data_name', default='albert', type=str)
     parser.add_argument('--max_ngram', default=3, type=int)
     parser.add_argument("--do_lower_case", default=False, action='store_true')
     parser.add_argument('--seed', default=42, type=int)
-    parser.add_argument("--line_per_file", default=10000, type=int)
-    parser.add_argument("--file_num", type=int, default=10,
-                        help="Number of dynamic masking to pregenerate (with different masks)")
+    # parser.add_argument("--file_num", type=int, default=10,                        help="Number of dynamic masking to pregenerate (with different masks)")
     parser.add_argument("--max_seq_len", type=int, default=128)
-    parser.add_argument("--short_seq_prob", type=float, default=0.1,
-                        help="Probability of making a short sentence as a training example")
-    parser.add_argument("--masked_lm_prob", type=float, default=0.15,
-                        help="Probability of masking each token for the LM task")
-    parser.add_argument("--max_predictions_per_seq", type=int, default=20,  # 128 * 0.15
-                        help="Maximum number of tokens to mask in each sequence")
+    parser.add_argument("--short_seq_prob", type=float, default=0.1,                        help="Probability of making a short sentence as a training example")
+    parser.add_argument("--masked_lm_prob", type=float, default=0.15,                        help="Probability of masking each token for the LM task")
+    # 128 * 0.15
+    parser.add_argument("--max_predictions_per_seq", type=int, default=20,                         help="Maximum number of tokens to mask in each sequence")
     args = parser.parse_args()
     seed_everything(args.seed)
     from configs.base import config
     args.vocab_path=config['albert_vocab_path']
     args.data_dir=config['data_dir']
-    args.output_dir=config['outputs']
-    args.data_dir = Path(args.data_dir)
-    if not os.path.exists(args.output_dir):
-        os.mkdir(args.output_dir)
-    init_logger(log_file=args.output_dir /"pregenerate_training_data_ngram.log")
     logger.info("pregenerate training data parameters:\n %s", args)
     tokenizer = BertTokenizer(vocab_file=args.vocab_path, do_lower_case=args.do_lower_case)
 
-    # split big file     # else over memorary
-    if args.do_split:
-        # corpus_path =args.data_dir / "corpus/corpus.txt"
-        # corpus_path =args.data_dir / "corpus/origin/zhwikibooks-20200520-pages-articles.txt"
-        # corpus_path =args.data_dir / "cgoal_num_predictorpus/origin/zhwiki-20200520-pages-articles.txt"
-        # corpus_path =args.data_dir / "corpus/origin/" / args.origin_file
-        corpus_path =args.data_dir / "corpus/big/" / args.big_file
-        # split_save_path = args.data_dir / "corpus/big"
-        split_save_path = args.data_dir / "corpus/small"
-        if split_save_path.exists():
-            files = sorted([f for f in split_save_path.iterdir() if f.exists() and '.txt' in str(f)])
-            for file in files:
-                abspath=os.path.abspath(file)
-                logger.warning(f" remove {abspath}")
-                os.remove(abspath)
+    small_path = config['data_dir'] / "corpus/small"
+    files = sorted([f for f in small_path.iterdir() if f.exists() and '.txt' in str(f)])
 
-        if not split_save_path.exists():
-            split_save_path.mkdir(exist_ok=True)
-        line_per_file = args.line_per_file
-        command = f'split -a 4 -l {line_per_file} -d {corpus_path} {split_save_path}/split_ --additional-suffix=.txt'
-        logger.info(f" split command {command }")
-        os.system(f"{command}")
+    file_path=files[0].absolute()
+    max_seq_len = args.max_seq_len
+    train(file_path,tokenizer,   max_seq_len)
+    print("  dataloader ok! ")
+    sys.exit(0)
 
-    # generator train data
-    if args.do_data:
-        data_path = args.data_dir / "corpus/train"
-        # files = sorted([f for f in data_path.parent.iterdir() if f.exists() and '.txt' in str(f)])
-        small_path = config['data_dir'] / "corpus/small"
-        files = sorted([f for f in small_path.iterdir() if f.exists() and '.txt' in str(f)])
-        random.shuffle(files)
 
-        for idx in range(args.file_num):
-            if idx!=int(args.idx):
-                continue
-            logger.info(f"pregenetate {args.data_name}_file_{idx}.json")
-            save_filename = data_path / f"{args.data_name}_file_{idx}.json"
-            num_instances = 0
-            with save_filename.open('w') as fw:
-                for file_idx in range(len(files)):
-                    file_path = files[file_idx]
-                    file_examples = create_training_instances(input_file=file_path,
-                                                              tokenizer=tokenizer,
-                                                              max_seq_len=args.max_seq_len,
-                                                              max_ngram=args.max_ngram,
-                                                              short_seq_prob=args.short_seq_prob,
-                                                              masked_lm_prob=args.masked_lm_prob,
-                                                              max_predictions_per_seq=args.max_predictions_per_seq)
-                    file_examples = [json.dumps(instance, ensure_ascii=False) for instance in file_examples]
-                    for instance in file_examples:
-                        fw.write(instance + '\n')
-                        num_instances += 1
-            metrics_file = data_path / f"{args.data_name}_file_{idx}_metrics.json"
-            print(f"num_instances: {num_instances}")
-            with metrics_file.open('w') as metrics_file:
-                metrics = {
-                    "num_training_examples": num_instances,
-                    "max_seq_len": args.max_seq_len
-                }
-                metrics_file.write(json.dumps(metrics, ensure_ascii=False))
-
-    if args.do_mdata:
-        # @wraps(main)
-        def gene_example(idx):
-            cmd = "python prepare_lm_data_ngram.py --do_data "
-            command= cmd+f" --idx={idx} "
-            logger.info(f"command:{command}")
-            os.system(f"{command}")
-            return 0
-
-        # from multiprocessing import Pool
-        # with Pool(5) as pool:
-        #     pool.map(gene_example,[ idx for idx in range(args.file_num) ])
-        from concurrent.futures import ThreadPoolExecutor
-        executor = ThreadPoolExecutor(max_workers=5) # for file_num=10
-        executor.map(gene_example,[ idx for idx in range(args.file_num) ])
 
 if __name__ == '__main__':
     main()
 
 '''
-split -a 4 -l 10000 -d  dataset/corpus/origin/zhwikibooks-20200520-pages-articles.txt  dataset/corpus/big/split_ --additional-suffix=.txt
-split -a 4 -l 1000000 -d /media/u/t1/dataset/albert_pytorch/dataset/corpus/origin/zhwiki-20200520-pages-articles.txt /media/u/t1/dataset/albert_pytorch/dataset/corpus/big/split_ --additional-suffix=.txt
-
-python prepare_lm_data_ngram.py --do_split --big_file=zhwiki-20200520-pages-articles.txt --line_per_file=10000
-
-split -a 4 -l 100000 -d  dataset/corpus/origin/zhwikibooks-20200520-pages-articles.txt  dataset/corpus/big/split_ --additional-suffix=.txt
-
-python prepare_lm_data_ngram.py --do_split  --big_file=split_0000.txt
-python prepare_lm_data_ngram.py --do_mdata
 
 
  小文件加载 逐语料库 全词覆盖 全字覆盖 
