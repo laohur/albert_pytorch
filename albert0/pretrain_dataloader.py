@@ -65,54 +65,29 @@ def convert_example_to_features(example, tokenizer, max_seq_length):
 
 class PregeneratedDataset(Dataset):
     def __init__(self, input_file,tokenizer,  seq_len=128 ,max_ngram=3):
-        file_examples = create_training_instances(input_file=input_file,
+        self.tokenizer = tokenizer
+        self.seq_len=seq_len
+        self.file_examples = create_training_instances(input_file=input_file,
                                                   tokenizer=tokenizer,
                                                   max_seq_len=seq_len,
                                                   max_ngram=max_ngram,
                                                   short_seq_prob=0.1, #"Probability of making a short sentence as a training example"
                                                   masked_lm_prob=0.15, #"Probability of masking each token for the LM task"
                                                   max_predictions_per_seq=20) #"Maximum number of tokens to mask in each sequence"
-        self.tokenizer = tokenizer
-
-        num_samples = len(file_examples)
-        self.temp_dir = None
-        self.working_dir = None
-
-        input_ids = np.zeros(shape=(num_samples, seq_len), dtype=np.int32)
-        input_masks = np.zeros(shape=(num_samples, seq_len), dtype=np.bool)
-        segment_ids = np.zeros(shape=(num_samples, seq_len), dtype=np.bool)
-        lm_label_ids = np.full(shape=(num_samples, seq_len), dtype=np.int32, fill_value=-1)
-        is_nexts = np.zeros(shape=(num_samples,), dtype=np.bool)
-        # logger.info(f"Loading training examples for {str(data_file)}")
-        # with data_file.open() as f:
-        for i, line in enumerate(file_examples):
-            # line = line.strip()
-            # example = json.loads(line)
-            features = convert_example_to_features(line, tokenizer, seq_len)
-            input_ids[i] = features.input_ids
-            segment_ids[i] = features.segment_ids
-            input_masks[i] = features.input_mask
-            lm_label_ids[i] = features.lm_label_ids
-            is_nexts[i] = features.is_next
-        assert i == num_samples - 1  # Assert that the sample count metric was true
-        logger.info("Loading complete!")
-        self.num_samples = num_samples
-        self.seq_len = seq_len
-        self.input_ids = input_ids
-        self.input_masks = input_masks
-        self.segment_ids = segment_ids
-        self.lm_label_ids = lm_label_ids
-        self.is_nexts = is_nexts
 
     def __len__(self):
-        return self.num_samples
+        return len(self.file_examples)
 
     def __getitem__(self, item):
-        return (torch.tensor(self.input_ids[item].astype(np.int64)),
-                torch.tensor(self.input_masks[item].astype(np.int64)),
-                torch.tensor(self.segment_ids[item].astype(np.int64)),
-                torch.tensor(self.lm_label_ids[item].astype(np.int64)),
-                torch.tensor(self.is_nexts[item].astype(np.int64)))
+        features = convert_example_to_features(self.file_examples[item], self.tokenizer, self.seq_len)
+        input_ids=torch.tensor(np.array(features.input_ids,dtype=np.int32).astype(np.int64))
+        input_mask=torch.tensor(np.array(features.input_mask,dtype=np.bool).astype(np.int64))
+        segment_ids=torch.tensor(np.array(features.input_ids,dtype=np.bool).astype(np.int64))
+        lm_label_ids=torch.tensor(np.array(features.input_ids,dtype=np.int32).astype(np.int64))
+        is_next=torch.tensor(np.array(features.is_next,dtype=np.bool).astype(np.int64))
+
+        return ( input_ids, input_mask, segment_ids, lm_label_ids, is_next)
+
 
 MaskedLmInstance = collections.namedtuple("MaskedLmInstance", ["index", "label"])
 
@@ -208,8 +183,7 @@ def create_instances_from_document(all_documents, document_index, max_seq_length
                 segment_ids = [0 for _ in range(len(tokens_a) + 2)] + [1 for _ in range(len(tokens_b) + 1)]
 
                 # 创建masked LM的任务的数据 Creates the predictions for the masked LM objective
-                tokens, masked_lm_positions, masked_lm_labels = create_masked_lm_predictions(
-                    tokens, max_ngram, masked_lm_prob, max_predictions_per_seq, vocab_words)
+                tokens, masked_lm_positions, masked_lm_labels = create_masked_lm_predictions(tokens, max_ngram, masked_lm_prob, max_predictions_per_seq, vocab_words)
                 instance = {
                     "tokens": tokens,
                     "segment_ids": segment_ids,
@@ -290,8 +264,8 @@ def create_training_instances(input_file, tokenizer, max_seq_len, short_seq_prob
     # sentence boundaries for the "next sentence prediction" task).
     # (2) Blank lines between documents. Document boundaries are needed so
     # that the "next sentence prediction" task doesn't span between documents.
-    f = open(input_file, 'r')
-    lines = f.readlines()
+    with open(input_file, 'r') as f:
+        lines = f.readlines()
     pbar = ProgressBar(n_total=len(lines), desc='read data')
     for line_cnt, line in enumerate(lines):
         line = line.strip()

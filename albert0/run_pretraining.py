@@ -20,16 +20,14 @@ from model.tokenization_bert import BertTokenizer
 from callback.optimization.adamw import AdamW
 from callback.lr_scheduler import get_linear_schedule_with_warmup
 from tools.common import seed_everything
-
 from pretrain_dataloader import PregeneratedDataset
 
+global_step = 0
 
 def train(file_path):
-    global_step = 0
+    global global_step
     start_time = time.time()
     epoch_dataset = PregeneratedDataset(input_file=file_path,tokenizer=tokenizer)
-    # epoch_dataset = PregeneratedDataset(file_id=idx, training_path=pregenerated_data, tokenizer=tokenizer,
-    #                                     reduce_memory=args.reduce_memory, data_name=args.data_name)
     if args.local_rank == -1:
         train_sampler = RandomSampler(epoch_dataset)
     else:
@@ -87,14 +85,14 @@ def train(file_path):
                 eta_format = '%d:%02d' % (eta // 60, eta % 60)
             else:
                 eta_format = '%ds' % eta
+            train_logs = {}
             train_logs['loss'] = tr_loss.avg
             train_logs['mask_acc'] = tr_mask_acc.avg
             train_logs['sop_acc'] = tr_sop_acc.avg
             train_logs['mask_loss'] = tr_mask_loss.avg
             train_logs['sop_loss'] = tr_sop_loss.avg
             show_info = f'[Training]:[{epoch}/{args.epochs}]{global_step}/{num_train_optimization_steps} ' \
-                        f'- ETA: {eta_format}' + "-".join(
-                [f' {key}: {value:.4f} ' for key, value in train_logs.items()])
+                        f'- ETA: {eta_format}' + "-".join(                [f' {key}: {value:.4f} ' for key, value in train_logs.items()])
             logger.info(show_info)
             tr_mask_acc.reset()
             tr_sop_acc.reset()
@@ -127,7 +125,6 @@ def train(file_path):
 
 if __name__ == '__main__':
 
-
 # def main():
     parser = ArgumentParser()
     ## Required parameters
@@ -139,45 +136,26 @@ if __name__ == '__main__':
     #                     help="The output directory where the model predictions and checkpoints will be written.")
     parser.add_argument("--model_path", default='', type=str)
     parser.add_argument('--data_name', default='albert', type=str)
-    parser.add_argument("--file_num", type=int, default=10,
-                        help="Number of dynamic masking to pregenerate (with different masks)")
-    parser.add_argument("--reduce_memory", action="store_true",
-                        help="Store training data as on-disc memmaps to massively reduce memory usage")
-    parser.add_argument("--epochs", type=int, default=4,
-                        help="Number of epochs to train for")
-    parser.add_argument("--do_lower_case", action='store_true',
-                        help="Set this flag if you are using an uncased model.")
+    parser.add_argument("--file_num", type=int, default=10,                        help="Number of dynamic masking to pregenerate (with different masks)")
+    parser.add_argument("--reduce_memory", action="store_true",                        help="Store training data as on-disc memmaps to massively reduce memory usage")
+    parser.add_argument("--epochs", type=int, default=4,                        help="Number of epochs to train for")
+    parser.add_argument("--do_lower_case", action='store_true',                        help="Set this flag if you are using an uncased model.")
 
-    parser.add_argument('--num_eval_steps', default=100)
-    parser.add_argument('--num_save_steps', default=200)
-    parser.add_argument("--local_rank", type=int, default=-1,
-                        help="local_rank for distributed training on gpus")
-    parser.add_argument("--weight_decay", default=0.01, type=float,
-                        help="Weight deay if we apply some.")
-    parser.add_argument("--no_cuda", action='store_true',
-                        help="Whether not to use CUDA when available")
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
-                        help="Number of updates steps to accumulate before performing a backward/update pass.")
-    parser.add_argument("--train_batch_size", default=16, type=int,
-                        help="Total batch size for training.")
-    parser.add_argument('--loss_scale', type=float, default=0,
-                        help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
-                             "0 (default value): dynamic loss scaling.\n"
-                             "Positive power of 2: static loss scaling value.\n")
-    parser.add_argument("--warmup_proportion", default=0.1, type=float,
-                        help="Linear warmup over warmup_steps.")
-    parser.add_argument("--adam_epsilon", default=1e-8, type=float,
-                        help="Epsilon for Adam optimizer.")
+    parser.add_argument('--num_eval_steps', default=500)
+    parser.add_argument('--num_save_steps', default=100)
+    parser.add_argument("--local_rank", type=int, default=-1,                        help="local_rank for distributed training on gpus")
+    parser.add_argument("--weight_decay", default=0.01, type=float,                        help="Weight deay if we apply some.")
+    parser.add_argument("--no_cuda", action='store_true',                        help="Whether not to use CUDA when available")
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1,                        help="Number of updates steps to accumulate before performing a backward/update pass.")
+    parser.add_argument("--train_batch_size", default=16, type=int,                        help="Total batch size for training.")
+    parser.add_argument('--loss_scale', type=float, default=0,                        help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"                             "0 (default value): dynamic loss scaling.\n"                             "Positive power of 2: static loss scaling value.\n")
+    parser.add_argument("--warmup_proportion", default=0.1, type=float,                        help="Linear warmup over warmup_steps.")
+    parser.add_argument("--adam_epsilon", default=1e-8, type=float,                        help="Epsilon for Adam optimizer.")
     parser.add_argument('--max_grad_norm', default=1.0, type=float)
-    parser.add_argument("--learning_rate", default=0.000176, type=float,
-                        help="The initial learning rate for Adam.")
-    parser.add_argument('--seed', type=int, default=42,
-                        help="random seed for initialization")
-    parser.add_argument('--fp16_opt_level', type=str, default='O2',
-                        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
-                             "See details at https://nvidia.github.io/apex/amp.html")
-    parser.add_argument('--fp16', action='store_true',
-                        help="Whether to use 16-bit float precision instead of 32-bit")
+    parser.add_argument("--learning_rate", default=0.000176, type=float,                        help="The initial learning rate for Adam.")
+    parser.add_argument('--seed', type=int, default=42,                        help="random seed for initialization")
+    parser.add_argument('--fp16_opt_level', type=str, default='O2',                        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."                             "See details at https://nvidia.github.io/apex/amp.html")
+    parser.add_argument('--fp16', action='store_true',                        help="Whether to use 16-bit float precision instead of 32-bit")
     args = parser.parse_args()
     from configs.base import config
     args.vocab_path=config['albert_vocab_path']
@@ -187,25 +165,12 @@ if __name__ == '__main__':
     args.data_dir = Path(args.data_dir)
     args.output_dir = Path(args.output_dir)
 
-    pregenerated_data = args.data_dir / "corpus/train"
+    # pregenerated_data = args.data_dir / "corpus/train"
+    # assert pregenerated_data.is_dir(),         "--pregenerated_data should point to the folder of files made by prepare_lm_data_mask.py!"
     init_logger(log_file=str(args.output_dir/ "train_albert_model.log"))
-    assert pregenerated_data.is_dir(), \
-        "--pregenerated_data should point to the folder of files made by prepare_lm_data_mask.py!"
 
-    samples_per_epoch = 0
-    for i in range(args.file_num):
-        data_file = pregenerated_data / f"{args.data_name}_file_{i}.json"
-        metrics_file = pregenerated_data / f"{args.data_name}_file_{i}_metrics.json"
-        if data_file.is_file() and metrics_file.is_file():
-            metrics = json.loads(metrics_file.read_text())
-            samples_per_epoch += metrics['num_training_examples']
-        else:
-            if i == 0:
-                exit("No training data was found!")
-            print(f"Warning! There are fewer epochs of pregenerated data ({i}) than training epochs ({args.epochs}).")
-            print("This script will loop over the available data, but training diversity may be negatively impacted.")
-            break
-    logger.info(f"samples_per_epoch: {samples_per_epoch}")
+    # samples_per_epoch = 0
+    # logger.info(f"samples_per_epoch: {samples_per_epoch}")
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device(f"cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
         args.n_gpu = torch.cuda.device_count()
@@ -225,10 +190,9 @@ if __name__ == '__main__':
 
     seed_everything(args.seed)
     tokenizer = BertTokenizer.from_pretrained(args.vocab_path, do_lower_case=args.do_lower_case)
-    total_train_examples = samples_per_epoch * args.epochs
-
-    num_train_optimization_steps = int(
-        total_train_examples / args.train_batch_size / args.gradient_accumulation_steps)
+    # total_train_examples = samples_per_epoch * args.epochs
+    total_train_examples=10000000  # 5m~=8000lines   1g~=E7
+    num_train_optimization_steps = int( total_train_examples / args.train_batch_size / args.gradient_accumulation_steps)
     if args.local_rank != -1:
         num_train_optimization_steps = num_train_optimization_steps // torch.distributed.get_world_size()
     args.warmup_steps = int(num_train_optimization_steps * args.warmup_proportion)
@@ -274,7 +238,6 @@ if __name__ == '__main__':
     tr_sop_loss = AverageMeter()
     loss_fct = CrossEntropyLoss(ignore_index=-1)
 
-    train_logs = {}
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {total_train_examples}")
     logger.info(f"  Batch size = {args.train_batch_size}")
@@ -282,25 +245,15 @@ if __name__ == '__main__':
     logger.info(f"  warmup_steps = {args.warmup_steps}")
     seed_everything(args.seed)  # Added here for reproducibility
 
-
-    def refresh_train_data(big_file):
-        cmd = f"python prepare_lm_data_ngram.py --do_split --big_file={big_file} "
-        command = cmd
-        logger.info(f"command:{command}")
-        os.system(f"{command}")
-
-        cmd = f"python prepare_lm_data_ngram.py --do_mdata"
-        command=cmd
-        logger.info(f"command:{command}")
-        os.system(f"{command}")
-
     for epoch in range(args.epochs):
         small_path = config['data_dir'] / "corpus/small"
         files = sorted([f for f in small_path.iterdir() if f.exists() and '.txt' in str(f)])
+        random.shuffle(files)
         for file_path in files:
-
+            t0=time.time()
             train(file_path)
-
+            cost=time.time()-t0
+            logger.info(f" {file_path} trainned {cost}s ")
 # if __name__ == '__main__':
     # main()
 
