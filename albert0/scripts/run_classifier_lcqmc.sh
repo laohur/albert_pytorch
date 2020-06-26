@@ -4,7 +4,6 @@ CURRENT_DIR=`pwd`
 #export BERT_BASE_DIR=$CURRENT_DIR/prev_trained_model/albert_large_zh
 #export BERT_BASE_DIR=$CURRENT_DIR/prev_trained_model/albert_base
 export BERT_BASE_DIR=$CURRENT_DIR/outputs/lm-checkpoint
-
 export DATA_DIR=$CURRENT_DIR/dataset
 export OUTPUR_DIR=$CURRENT_DIR/outputs
 TASK_NAME="lcqmc"

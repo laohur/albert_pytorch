@@ -134,7 +134,7 @@ if __name__ == '__main__':
     # parser.add_argument("--vocab_path",default="configs/vocab.txt",type=str)
     # parser.add_argument("--output_dir", default='outputs', type=str,
     #                     help="The output directory where the model predictions and checkpoints will be written.")
-    parser.add_argument("--model_path", default='', type=str)
+    # parser.add_argument("--model_path", default='', type=str)
     parser.add_argument('--data_name', default='albert', type=str)
     parser.add_argument("--file_num", type=int, default=10,                        help="Number of dynamic masking to pregenerate (with different masks)")
     parser.add_argument("--reduce_memory", action="store_true",                        help="Store training data as on-disc memmaps to massively reduce memory usage")
@@ -155,7 +155,7 @@ if __name__ == '__main__':
     parser.add_argument("--learning_rate", default=0.000176, type=float,                        help="The initial learning rate for Adam.")
     parser.add_argument('--seed', type=int, default=42,                        help="random seed for initialization")
     parser.add_argument('--fp16_opt_level', type=str, default='O2',                        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."                             "See details at https://nvidia.github.io/apex/amp.html")
-    parser.add_argument('--fp16', action='store_true',                        help="Whether to use 16-bit float precision instead of 32-bit")
+    parser.add_argument('--fp16',default=True, action='store_true',                        help="Whether to use 16-bit float precision instead of 32-bit")
     args = parser.parse_args()
     from configs.base import config
     args.vocab_path=config['albert_vocab_path']
@@ -164,7 +164,6 @@ if __name__ == '__main__':
     args.config_path=config['albert_config_path']
     args.data_dir = Path(args.data_dir)
     args.output_dir = Path(args.output_dir)
-
     # pregenerated_data = args.data_dir / "corpus/train"
     # assert pregenerated_data.is_dir(),         "--pregenerated_data should point to the folder of files made by prepare_lm_data_mask.py!"
     init_logger(log_file=str(args.output_dir/ "train_albert_model.log"))
@@ -199,7 +198,9 @@ if __name__ == '__main__':
 
     bert_config = AlbertConfig.from_pretrained(args.config_path)
     model = AlbertForPreTraining(config=bert_config)
+    args.model_path = str((args.output_dir / "lm-checkpoint").absolute())
     if args.model_path:
+        logger.info(f" loadding {args.model_path} ")
         model = AlbertForPreTraining.from_pretrained(args.model_path)
     model.to(device)
     # Prepare optimizer
